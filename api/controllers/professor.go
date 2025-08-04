@@ -202,25 +202,23 @@ func professorCourse(flag string, c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 
 	var professorCourses []schema.Course // array of courses of the professors (or single professor with Id)
-	var professorQuery bson.M            // query filter the professor
+	var professorQuery bson.M
 	var err error
 
 	defer cancel()
 
 	// determine the professor's query
-	if professorQuery, err = getProfessorQuery(flag, c); err != nil {
-		return // if there's an error, the response will have already been thrown to the consumer, halt the funcion here
+	if professorQuery, err = getProfessorQueryForAggregate(flag, c); err != nil {
+		// the response will have already been thrown to the consumer, halt the execution here
+		return
 	}
 
-	// determine the offset and limit for pagination stage
-	// and delete "offset" field in professorQuery
 	paginateMap, err := configs.GetAggregateLimit(&professorQuery, c)
 	if err != nil {
 		respond(c, http.StatusBadRequest, "offset is not type integer", err.Error())
 		return
 	}
 
-	// Pipeline to query the courses from the filtered professors (or a single professor)
 	professorCoursePipeline := mongo.Pipeline{
 		// filter the professors
 		bson.D{{Key: "$match", Value: professorQuery}},
@@ -272,11 +270,13 @@ func professorCourse(flag string, c *gin.Context) {
 		respondWithInternalError(c, err)
 		return
 	}
+
 	// Parse the array of courses from these professors
 	if err = cursor.All(ctx, &professorCourses); err != nil {
 		respondWithInternalError(c, err)
 		return
 	}
+
 	respond(c, http.StatusOK, "success", professorCourses)
 }
 
@@ -338,28 +338,22 @@ func professorSection(flag string, c *gin.Context) {
 
 	defer cancel()
 
-	// determine the professor's query
-	if professorQuery, err = getProfessorQuery(flag, c); err != nil {
+	if professorQuery, err = getProfessorQueryForAggregate(flag, c); err != nil {
 		return
 	}
 
-	// determine the offset and limit for pagination stage
 	paginateMap, err := configs.GetAggregateLimit(&professorQuery, c)
 	if err != nil {
 		respond(c, http.StatusBadRequest, "offset is not type integer", err.Error())
 		return
 	}
 
-	// Pipeline to query the courses from the filtered professors (or a single professor)
 	professorSectionPipeline := mongo.Pipeline{
-		// filter the professors
 		bson.D{{Key: "$match", Value: professorQuery}},
 
-		// paginate the professors before pulling the courses from those professor
-		bson.D{{Key: "$skip", Value: paginateMap["former_offset"]}}, // skip to the specified offset
-		bson.D{{Key: "$limit", Value: paginateMap["limit"]}},        // limit to the specified number of professors
+		bson.D{{Key: "$skip", Value: paginateMap["former_offset"]}},
+		bson.D{{Key: "$limit", Value: paginateMap["limit"]}},
 
-		// lookup the array of sections from sections collection
 		bson.D{{Key: "$lookup", Value: bson.D{
 			{Key: "from", Value: "sections"},
 			{Key: "localField", Value: "sections"},
@@ -367,34 +361,27 @@ func professorSection(flag string, c *gin.Context) {
 			{Key: "as", Value: "sections"},
 		}}},
 
-		// project the sections
 		bson.D{{Key: "$project", Value: bson.D{{Key: "sections", Value: "$sections"}}}},
 
-		// unwind the sections
 		bson.D{{Key: "$unwind", Value: bson.D{
 			{Key: "path", Value: "$sections"},
-			{Key: "preserveNullAndEmptyArrays", Value: false}, // to avoid the professor documents that can't be replaced
+			{Key: "preserveNullAndEmptyArrays", Value: false},
 		}}},
 
-		// replace the combination of ids and sections with the sections entirely
 		bson.D{{Key: "$replaceWith", Value: "$sections"}},
 
-		// keep order deterministic between calls
 		bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
 
-		// paginate the sections
 		bson.D{{Key: "$skip", Value: paginateMap["latter_offset"]}},
 		bson.D{{Key: "$limit", Value: paginateMap["limit"]}},
 	}
 
-	// Perform aggreration on the pipeline
 	cursor, err := professorCollection.Aggregate(ctx, professorSectionPipeline)
 	if err != nil {
 		// return the error with there's something wrong with the aggregation
 		respondWithInternalError(c, err)
 		return
 	}
-	// Parse the array of sections from these professors
 	if err = cursor.All(ctx, &professorSections); err != nil {
 		respondWithInternalError(c, err)
 		return
@@ -402,32 +389,33 @@ func professorSection(flag string, c *gin.Context) {
 	respond(c, http.StatusOK, "success", professorSections)
 }
 
-// determine the query of the professor based on the parameters passed from context
-// if there's an error, throw an error response back to the API consumer and return only the error
-func getProfessorQuery(flag string, c *gin.Context) (bson.M, error) {
+// Determine the query of the professor based on parameters passed from context.
+//
+// If there's an error, throw an error, response back to the API consumer, and return only the error
+func getProfessorQueryForAggregate(flag string, c *gin.Context) (bson.M, error) {
 	var professorQuery bson.M
 	var err error
 
-	if flag == "Search" { // if the flag is Search, filter professors based on query parameters
-		// build the key-value pairs of query parameters
+	switch flag {
+	case "Search":
 		professorQuery, err = schema.FilterQuery[schema.Professor](c)
 		if err != nil {
 			respond(c, http.StatusBadRequest, "schema validation error", err.Error())
-			return nil, err // return only the error
+			return nil, err // Return only the error
 		}
-	} else if flag == "ById" { // if the flag is ById, filter that single professor based on their _id
-		// parse the ObjectId
-		objId, err := objectIDFromParam(c, "id")
+	case "ById":
+		professorId, err := objectIDFromParam(c, "id")
 		if err != nil {
+			respond(c, http.StatusBadRequest, "invalid professor type error", err.Error())
 			return nil, err
 		}
-		professorQuery = bson.M{"_id": objId}
-	} else {
-		// something wrong that messed up the server
-		err = errors.New("invalid type of filtering professors, either filtering based on available professor fields or ID")
+		professorQuery = bson.M{"_id": professorId}
+	default:
+		err = errors.New("invalid type of filtering professors, either filter on fields or ID")
 		respondWithInternalError(c, err)
 		return nil, err
 	}
+
 	return professorQuery, err
 }
 

@@ -47,7 +47,7 @@ func CourseSearch(c *gin.Context) {
 
 	var courses []schema.Course
 
-	// build query key value pairs (only one value per key)
+	// Build query key value pairs (only one value per key)
 	query, err := schema.FilterQuery[schema.Course](c)
 	if err != nil {
 		respond(c, http.StatusBadRequest, "schema validation error", err.Error())
@@ -60,7 +60,7 @@ func CourseSearch(c *gin.Context) {
 		return
 	}
 
-	// get cursor for query results
+	// Get cursor for query results
 	cursor, err := courseCollection.Find(ctx, query, optionLimit)
 	if err != nil {
 		respondWithInternalError(c, err)
@@ -178,7 +178,7 @@ func CourseSectionById() gin.HandlerFunc {
 	}
 }
 
-// get the sections of the courses, filters depending on the flag
+// Get the sections of the courses, filters depending on the flag
 func courseSection(flag string, c *gin.Context) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -187,25 +187,26 @@ func courseSection(flag string, c *gin.Context) {
 	var courseQuery bson.M              // query of the courses (or the single course)
 	var err error                       // error
 
-	// determine the course query
-	if flag == "Search" { // filter courses based on the query parameters
-		// build the key-value pair of query parameters
+	// Determine the course query
+	switch flag {
+	case "Search":
+		// Filter courses based on the query parameters
 		courseQuery, err = schema.FilterQuery[schema.Course](c)
 		if err != nil {
 			// return the validation error if there's anything wrong
 			respond(c, http.StatusBadRequest, "schema validation error", err.Error())
 			return
 		}
-	} else if flag == "ById" { // filter the single course based on it's Id
-		// convert the id param with the ObjectID
-		objId, err := objectIDFromParam(c, "id")
+	case "ById":
+		// Filter the single course based on it's Id
+		courseId, err := objectIDFromParam(c, "id")
 		if err != nil {
+			respond(c, http.StatusBadRequest, "invalid course id error", err.Error())
 			return
 		}
-		courseQuery = bson.M{"_id": objId}
-	} else {
-		err = errors.New("invalid type of filtering courses, either filtering based on available course fields or ID")
-		// otherwise, something that messed up the server
+		courseQuery = bson.M{"_id": courseId}
+	default:
+		err = errors.New("invalid type of filtering courses, either on fields or ID")
 		respondWithInternalError(c, err)
 		return
 	}
@@ -218,7 +219,7 @@ func courseSection(flag string, c *gin.Context) {
 		return
 	}
 
-	// pipeline to query the sections from the filtered courses
+	// Pipeline to query the sections from the filtered courses
 	courseSectionPipeline := mongo.Pipeline{
 		// filter the courses
 		bson.D{{Key: "$match", Value: courseQuery}},
@@ -252,14 +253,14 @@ func courseSection(flag string, c *gin.Context) {
 		bson.D{{Key: "$limit", Value: paginateMap["limit"]}},
 	}
 
-	// perform aggregation on the pipeline
+	// Perform aggregation on the pipeline
 	cursor, err := courseCollection.Aggregate(ctx, courseSectionPipeline)
 	if err != nil {
 		// return error for any aggregation problem
 		respondWithInternalError(c, err)
 		return
 	}
-	// parse the array of sections of the course
+	// Parse the array of sections of the course
 	if err = cursor.All(ctx, &courseSections); err != nil {
 		respondWithInternalError(c, err)
 		return
